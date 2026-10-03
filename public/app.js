@@ -2,7 +2,7 @@
  * 前端：帧/斑点录入、参数控制、调用谱系算法、可视化母女连线与漏检段。
  * 任一录入改动都会立即作废已显示的旧谱系，必须重新点击「复原谱系」。
  */
-import { solveLineage, validateInput, isIntCoord, MIN_FRAMES, MAX_FRAMES,
+import { solveLineage, validateInput, isIntCoord, isNonNegInt, MIN_FRAMES, MAX_FRAMES,
   MIN_SPOTS_PER_FRAME, MAX_SPOTS_PER_FRAME } from '../src/lineage.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -211,15 +211,16 @@ function parseDraft() {
   const frames = draft.frames.map((spots, f) => spots.map((s, i) => {
     const id = String(s.id ?? '').trim();
     if (!id) problems.push(`第 ${f + 1} 帧第 ${i + 1} 个斑点缺少编号`);
-    // 坐标保留原始十进制文本：超出 2^53 的整数若经 Number 中转会被四舍五入，
-    // 必须原样交给算法精确解析（草稿中可能是字符串或 number）
+    // 坐标与亮度都保留原始十进制文本：超出 2^53 的整数若经 Number 中转会被
+    // 四舍五入（9007199254740993 → 9007199254740992），必须原样交给算法精确解析
+    // （草稿中可能是字符串或 number）
     const x = typeof s.x === 'string' ? s.x.trim() : s.x;
     const y = typeof s.y === 'string' ? s.y.trim() : s.y;
-    const b = Number(s.brightness);
+    const b = typeof s.brightness === 'string' ? s.brightness.trim() : s.brightness;
     const label = id || `#${i + 1}`;
     if (!isIntCoord(x)) problems.push(`第 ${f + 1} 帧斑点 ${label} 的 x 必须是整数`);
     if (!isIntCoord(y)) problems.push(`第 ${f + 1} 帧斑点 ${label} 的 y 必须是整数`);
-    if (s.brightness === '' || s.brightness === null || !Number.isInteger(b) || b < 0) {
+    if (!isNonNegInt(b)) {
       problems.push(`第 ${f + 1} 帧斑点 ${label} 的亮度必须是非负整数`);
     }
     return { id, x, y, brightness: b };
@@ -513,12 +514,9 @@ els.editor.addEventListener('input', (ev) => {
   const f = Number(block.dataset.frame);
   const i = Number(rowEl.dataset.idx);
   const field = input.dataset.field;
-  // 坐标保留输入原文（十进制整数字符串）：超大整数坐标不经 Number，
-  // 草稿存取与求解全程不丢精度；亮度仍按数值保存
-  const v = field === 'id' || field === 'x' || field === 'y'
-    ? input.value
-    : (input.value === '' ? '' : Number(input.value));
-  draft.frames[f][i][field] = v;
+  // 坐标与亮度都保留输入原文（十进制整数字符串）：超大整数不经 Number，
+  // 草稿存取与求解全程不丢精度
+  draft.frames[f][i][field] = input.value;
   if (field === 'id' && f === 0) renderStartSelect();
   markDirty();
 });
