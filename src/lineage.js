@@ -20,6 +20,10 @@
  * 坐标精度：整数坐标接受 number / 十进制整数字符串 / bigint，一律以 BigInt
  * 参与运算；位移判定用精确平方距离与 maxMove²（double 精确分解为二进有理数）
  * 比较——超出 2^53 的坐标（如 9007199254740993）也不会被压缩成相邻偶数。
+ *
+ * 亮度精度：非负整数亮度同样接受 number / 十进制整数字符串 / bigint，不设量级
+ * 上限；累计与裁决一律使用 BigInt——相差 1 的超大亮度（2^53 与 2^53+1）不会
+ * 因 double 四舍五入而被误判为同亮度、转由录入顺序裁决。
  */
 
 export const MIN_FRAMES = 4;
@@ -48,6 +52,27 @@ function toBigInt(v) {
 
 /** 坐标是否为合法整数（整数 number / 十进制整数字符串 / bigint），不设量级上限 */
 export const isIntCoord = (v) => toBigInt(v) !== null;
+
+const NON_NEG_INT_RE = /^\d+$/;
+
+/**
+ * 非负整数亮度精确解析：接受非负整数 number、十进制非负整数字符串或非负 bigint，
+ * 统一转为 BigInt——超出 2^53 的亮度在 double 中会被四舍五入
+ * （9007199254740993 会变成 9007199254740992），绝不能经 Number 中转。
+ * 非法输入返回 null，不设量级上限（契约允许任意非负整数）。
+ */
+function toBrightBigInt(v) {
+  if (typeof v === 'bigint') return v >= 0n ? v : null;
+  if (typeof v === 'number') return Number.isInteger(v) && v >= 0 ? BigInt(v) : null;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    return NON_NEG_INT_RE.test(t) ? BigInt(t) : null;
+  }
+  return null;
+}
+
+/** 亮度是否为合法非负整数（整数 number / 十进制非负整数字符串 / bigint），不设量级上限 */
+export const isNonNegInt = (v) => toBrightBigInt(v) !== null;
 
 /** 精确平方距离（BigInt）：要求斑点带有 BigInt 坐标 bx/by */
 const d2exact = (a, b) => {
@@ -133,7 +158,7 @@ export function validateInput(frames, opts) {
       if (!s || !isIntCoord(s.x) || !isIntCoord(s.y)) {
         errors.push(`第 ${f + 1} 帧斑点 ${label} 的坐标必须是整数`);
       }
-      if (!s || !isInt(s.brightness) || s.brightness < 0) {
+      if (!s || toBrightBigInt(s.brightness) === null) {
         errors.push(`第 ${f + 1} 帧斑点 ${label} 的亮度必须是非负整数`);
       }
     });
@@ -197,9 +222,10 @@ export function solveLineage(rawFrames, opts) {
   if (errors.length) return { ok: false, errors };
 
   const { startId, maxMove, maxSkip, survivors } = opts;
-  // 坐标统一转为 BigInt（bx/by）参与精确运算；原始 x/y 原样保留用于结果回显
+  // 坐标统一转为 BigInt（bx/by）参与精确运算；原始 x/y 原样保留用于结果回显。
+  // 亮度统一转为 BigInt（bb）参与累计与裁决；原始 brightness 原样保留用于回显。
   const F = rawFrames.map((spots, f) => spots.map((s, idx) => ({
-    ...s, f, idx, bx: toBigInt(s.x), by: toBigInt(s.y),
+    ...s, f, idx, bx: toBigInt(s.x), by: toBigInt(s.y), bb: toBrightBigInt(s.brightness),
   })));
   const n = F.length;
 
@@ -227,10 +253,10 @@ export function solveLineage(rawFrames, opts) {
 
   const start = F[0].find((s) => s.id === startId);
 
-  // 每帧最亮的 L 个斑点亮度之和（可采纳乐观上界用）
+  // 每帧最亮的 L 个斑点亮度之和（可采纳乐观上界用，BigInt 精确累加）
   const topSums = F.map((spots) => {
-    const sorted = spots.map((s) => s.brightness).sort((a, b) => b - a);
-    const sums = [0];
+    const sorted = spots.map((s) => s.bb).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    const sums = [0n];
     for (let j = 0; j < sorted.length; j++) sums[j + 1] = sums[j] + sorted[j];
     return sums;
   });
@@ -331,7 +357,7 @@ export function solveLineage(rawFrames, opts) {
    * 存活数每个帧间至多翻倍，且不超过 survivors。
    */
   function upperBound(node) {
-    let add = 0;
+    let add = 0n;
     let cap = popcount(node.vm) * 2 + popcount(node.pm); // 下一帧的存活上限
     for (let f = node.frame + 1; f < n; f++) {
       add += topSums[f][Math.min(cap, survivors, F[f].length)];
@@ -350,15 +376,15 @@ export function solveLineage(rawFrames, opts) {
     ls[0].set(stateKey(bit(start.idx), 0), {
       frame: 0,
       vm: bit(start.idx), pm: 0, vis: [start],
-      bright: start.brightness, miss: 0,
+      bright: start.bb, miss: 0,
       sig: [], actions: [], prev: null,
     });
     for (let i = 0; i < n - 1; i++) {
       for (const node of ls[i].values()) {
         for (const o of expand(i, node, allowSkip)) {
           const nextSpots = F[i + 1];
-          let brightDelta = 0;
-          for (const j of maskIndices(o.dm)) brightDelta += nextSpots[j].brightness;
+          let brightDelta = 0n;
+          for (const j of maskIndices(o.dm)) brightDelta += nextSpots[j].bb;
           const cand = {
             frame: i + 1,
             vm: o.dm,
@@ -466,13 +492,19 @@ export function solveLineage(rawFrames, opts) {
     });
   });
 
+  // 总亮度：安全整数范围内保持 number（普通亮度既有结果不变）；超出 2^53 时
+  // 以十进制文本给出精确值，避免 double 四舍五入丢掉相差 1 的亮度差。
+  const brightOut = bestNode.bright <= BigInt(Number.MAX_SAFE_INTEGER)
+    ? Number(bestNode.bright)
+    : bestNode.bright.toString();
+
   return {
     ok: true,
     lineage: {
       frames: n,
       adopted,
       links,
-      totalBrightness: bestNode.bright,
+      totalBrightness: brightOut,
       misses: bestNode.miss,
       survivors: adoptedByFrame[n - 1].map((s) => s.id),
     },
